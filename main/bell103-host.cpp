@@ -1,196 +1,24 @@
 #include <stdio.h>
+#include <string.h>
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <thread>
+#include "esp_event.h"
+#include "esp_wifi.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
 
+#include "cmx865a.h"
 #include "ShellProcessor.h"
 
+#define MAXIMUM_AP 20
+
 // In order on DEVKIT V1 board
-#define PIN_DATAOUT GPIO_NUM_13
-#define PIN_CLK GPIO_NUM_12
-#define PIN_DATAIN GPIO_NUM_14
-#define PIN_CS GPIO_NUM_27
 #define PIN_HOOKSWITCH GPIO_NUM_26
 #define PIN_LED GPIO_NUM_2
-
-class cmx865a {
-public:
-
-  cmx865a();
-
-  void write0(uint8_t addr);
-  void write8(uint8_t addr, uint8_t data);
-  void write16(uint8_t addr, uint16_t data);
-
-  uint8_t read8(uint8_t addr);
-  uint16_t read16(uint8_t addr);
-
-  // #### TODO: BOOLEAN
-  int rxReady();
-  int rxEnergy();
-  int txReady();
-  int programReady();
-
-  /**
-   * Sends multiple characters of text using the UART
-   */
-  void send(const char* s);
-
-private:
-
-  void _write8(uint8_t b);
-  uint8_t _read8();
-  void _setCS(int level);
-  void _setCLK(int level);
-  void _strobeCLK();
-  void _setDATAIN(int level);
-  int _getDATAOUT();
-};
-
-cmx865a::cmx865a() {
-  gpio_reset_pin(PIN_CS);
-  gpio_set_direction(PIN_CS, GPIO_MODE_OUTPUT);
-  gpio_set_level(PIN_CS, 1);
-  gpio_reset_pin(PIN_CLK);
-  gpio_set_direction(PIN_CLK, GPIO_MODE_OUTPUT);
-  gpio_set_level(PIN_CLK, 0);
-  gpio_reset_pin(PIN_DATAIN);
-  gpio_set_direction(PIN_DATAIN, GPIO_MODE_OUTPUT);
-  gpio_set_level(PIN_DATAIN, 0);
-  gpio_reset_pin(PIN_DATAOUT);
-  gpio_set_direction(PIN_DATAOUT, GPIO_MODE_INPUT);
-}
-
-void cmx865a::_setCLK(int level) {
-    gpio_set_level(PIN_CLK, level);
-}
-
-void cmx865a::_strobeCLK() {
-  _setCLK(1);
-  _setCLK(0);
-}
-
-void cmx865a::_setCS(int level) {
-    gpio_set_level(PIN_CS, level);
-}
-
-void cmx865a::_setDATAIN(int level) {
-    gpio_set_level(PIN_DATAIN, level);
-}
-
-int cmx865a::_getDATAOUT() {
-    return gpio_get_level(PIN_DATAOUT);
-}
-
-void cmx865a::_write8(uint8_t b) {
-  // MBS first! 
-  for (unsigned int i = 0; i < 8; i++) {
-    if (b & 0x80) {
-      _setDATAIN(1);
-    } else {
-      _setDATAIN(0);
-    }
-    _strobeCLK();
-    b = b << 1;
-  }
-}
-
-uint8_t cmx865a::_read8() {
-  uint8_t result = 0;
-  for (unsigned int i = 0; i < 8; i++) {
-    result = result << 1;
-    // Per 5.11 data is valid when serial clock is high
-    _setCLK(1);    
-    if (_getDATAOUT() == 1) {
-      result |= 1;
-    }    
-    _setCLK(0);    
-  }
-  return result;
-}
-
-void cmx865a::write0(uint8_t addr) {
-  _setCS(0);
-  _write8(addr);
-  // ????
-  _setDATAIN(0);        
-  _setCS(1);    
-}
-
-void cmx865a::write8(uint8_t addr, uint8_t data) {
-  _setCS(0);
-  _write8(addr);
-  _write8(data);
-  // ????
-  _setDATAIN(0);        
-  _setCS(1);    
-}
-
-void cmx865a::write16(uint8_t addr, uint16_t data) {
-  _setCS(0);
-  _write8(addr);
-  // MSByte
-  _write8((data & 0xff00) >> 8);
-  // LSByte
-  _write8((data & 0x00ff));
-  // ????
-  _setDATAIN(0);        
-  _setCS(1);    
-}
-
-uint8_t cmx865a::read8(uint8_t addr) {
-  _setCS(0);
-  _write8(addr);
-  uint8_t d = _read8();
-  _setCS(1);    
-  return d;
-}
-
-uint16_t cmx865a::read16(uint8_t addr) {
-  _setCS(0);
-  _write8(addr);
-  // MSByte
-  uint8_t msb = _read8();
-  // LSByte
-  uint8_t lsb = _read8();
-  _setCS(1);    
-  return (msb << 8) | lsb;
-}
-
-int cmx865a::rxReady() {
-  uint16_t a = read16(0xe6);
-  return (a & 0b0000000001000000) != 0;
-}
-
-int cmx865a::rxEnergy() {
-  uint16_t a = read16(0xe6);
-  //            5432109876543210
-  return (a & 0b0000010000000000) != 0;
-}
-
-int cmx865a::txReady() {
-  uint16_t a = read16(0xe6);
-  //            5432109876543210
-  return (a & 0b0000100000000000) != 0;
-}
-
-int cmx865a::programReady() {
-  uint16_t a = read16(0xe6);
-  //            5432109876543210
-  return (a & 0b0010000000000000) != 0;
-}
-
-void cmx865a::send(const char* s) {
-  for (unsigned int i = 0; s[i] != 0; i++) {
-    // Wait util we can send
-    while (!txReady()) {
-    }
-    write8(0xe3, (uint8_t)s[i]);
-  }
-}
 
 /**
  * Enables modem (data) mode
@@ -289,7 +117,8 @@ private:
   cmx865a* _modem;
 };
 
-static void loop(cmx865a& modem, ShellProcessor& shellProc);
+static void loop(cmx865a& modem, ShellProcessor& shellProc, SerialPort& port);
+static void wifi_scan(SerialPort& port);
 
 static void run() {
 
@@ -364,13 +193,13 @@ static void run() {
   delay(250);
   gpio_set_level(PIN_LED, 0);
 
-  loop(modem, shellProc);
+  loop(modem, shellProc, port);
 }
 
 #define ON_HOOK 1
 #define OFF_HOOK 0
 
-static void loop(cmx865a& modem, ShellProcessor& shellProc) {
+static void loop(cmx865a& modem, ShellProcessor& shellProc, SerialPort& port) {
 
   int lastHs = 1;
   long lastHsTransition = 0;
@@ -388,23 +217,9 @@ static void loop(cmx865a& modem, ShellProcessor& shellProc) {
       // Check for inbound on the modem
       if (modem.rxReady()) {
         uint8_t d = modem.read8(0xe5);
-        //Serial.print((char)d);
         shellProc.processInput(d);
-        // Echo typed characters
-        //while (!modem.txReady()) { }
-        //modem.write8(0xe3, (uint8_t)d);
       }
     
-      /*
-      if (Serial.available()) {
-        int c = Serial.read();
-        // Wait util we can send
-        while (!modem.txReady()) {
-        }
-        modem.write8(0xe3, (uint8_t)c);
-      }
-      */
-
       // Show RX energy indication on the LED
       if (modem.rxEnergy()) {
         gpio_set_level(PIN_LED, 1);
@@ -538,6 +353,10 @@ static void loop(cmx865a& modem, ShellProcessor& shellProc) {
       // Send a message to the remote station
       delay(1000);
       modem.send("You are now connected.\r\nWelcome to the 1980's\r\n\r\n");
+      // Show the WIFI networks
+      port.send("WIFI networks:\r\n");
+      wifi_scan(port);
+      port.send("\r\n");
     }
     else if (state == 11) {
       
@@ -566,8 +385,170 @@ static void loop(cmx865a& modem, ShellProcessor& shellProc) {
   }
 }
 
+#define DEFAULT_SCAN_LIST_SIZE 20
+
+static const char *TAG = "scan";
+
+static void print_auth_mode(int authmode)
+{
+    switch (authmode) {
+    case WIFI_AUTH_OPEN:
+        ESP_LOGI(TAG, "Authmode \tWIFI_AUTH_OPEN");
+        break;
+    case WIFI_AUTH_OWE:
+        ESP_LOGI(TAG, "Authmode \tWIFI_AUTH_OWE");
+        break;
+    case WIFI_AUTH_WEP:
+        ESP_LOGI(TAG, "Authmode \tWIFI_AUTH_WEP");
+        break;
+    case WIFI_AUTH_WPA_PSK:
+        ESP_LOGI(TAG, "Authmode \tWIFI_AUTH_WPA_PSK");
+        break;
+    case WIFI_AUTH_WPA2_PSK:
+        ESP_LOGI(TAG, "Authmode \tWIFI_AUTH_WPA2_PSK");
+        break;
+    case WIFI_AUTH_WPA_WPA2_PSK:
+        ESP_LOGI(TAG, "Authmode \tWIFI_AUTH_WPA_WPA2_PSK");
+        break;
+    case WIFI_AUTH_WPA2_ENTERPRISE:
+        ESP_LOGI(TAG, "Authmode \tWIFI_AUTH_WPA2_ENTERPRISE");
+        break;
+    case WIFI_AUTH_WPA3_PSK:
+        ESP_LOGI(TAG, "Authmode \tWIFI_AUTH_WPA3_PSK");
+        break;
+    case WIFI_AUTH_WPA2_WPA3_PSK:
+        ESP_LOGI(TAG, "Authmode \tWIFI_AUTH_WPA2_WPA3_PSK");
+        break;
+    default:
+        ESP_LOGI(TAG, "Authmode \tWIFI_AUTH_UNKNOWN");
+        break;
+    }
+}
+
+static void print_cipher_type(int pairwise_cipher, int group_cipher)
+{
+    switch (pairwise_cipher) {
+    case WIFI_CIPHER_TYPE_NONE:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_NONE");
+        break;
+    case WIFI_CIPHER_TYPE_WEP40:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_WEP40");
+        break;
+    case WIFI_CIPHER_TYPE_WEP104:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_WEP104");
+        break;
+    case WIFI_CIPHER_TYPE_TKIP:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_TKIP");
+        break;
+    case WIFI_CIPHER_TYPE_CCMP:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_CCMP");
+        break;
+    case WIFI_CIPHER_TYPE_TKIP_CCMP:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_TKIP_CCMP");
+        break;
+    case WIFI_CIPHER_TYPE_AES_CMAC128:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_AES_CMAC128");
+        break;
+    case WIFI_CIPHER_TYPE_SMS4:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_SMS4");
+        break;
+    case WIFI_CIPHER_TYPE_GCMP:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_GCMP");
+        break;
+    case WIFI_CIPHER_TYPE_GCMP256:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_GCMP256");
+        break;
+    default:
+        ESP_LOGI(TAG, "Pairwise Cipher \tWIFI_CIPHER_TYPE_UNKNOWN");
+        break;
+    }
+
+    switch (group_cipher) {
+    case WIFI_CIPHER_TYPE_NONE:
+        ESP_LOGI(TAG, "Group Cipher \tWIFI_CIPHER_TYPE_NONE");
+        break;
+    case WIFI_CIPHER_TYPE_WEP40:
+        ESP_LOGI(TAG, "Group Cipher \tWIFI_CIPHER_TYPE_WEP40");
+        break;
+    case WIFI_CIPHER_TYPE_WEP104:
+        ESP_LOGI(TAG, "Group Cipher \tWIFI_CIPHER_TYPE_WEP104");
+        break;
+    case WIFI_CIPHER_TYPE_TKIP:
+        ESP_LOGI(TAG, "Group Cipher \tWIFI_CIPHER_TYPE_TKIP");
+        break;
+    case WIFI_CIPHER_TYPE_CCMP:
+        ESP_LOGI(TAG, "Group Cipher \tWIFI_CIPHER_TYPE_CCMP");
+        break;
+    case WIFI_CIPHER_TYPE_TKIP_CCMP:
+        ESP_LOGI(TAG, "Group Cipher \tWIFI_CIPHER_TYPE_TKIP_CCMP");
+        break;
+    case WIFI_CIPHER_TYPE_SMS4:
+        ESP_LOGI(TAG, "Group Cipher \tWIFI_CIPHER_TYPE_SMS4");
+        break;
+    case WIFI_CIPHER_TYPE_GCMP:
+        ESP_LOGI(TAG, "Group Cipher \tWIFI_CIPHER_TYPE_GCMP");
+        break;
+    case WIFI_CIPHER_TYPE_GCMP256:
+        ESP_LOGI(TAG, "Group Cipher \tWIFI_CIPHER_TYPE_GCMP256");
+        break;
+    default:
+        ESP_LOGI(TAG, "Group Cipher \tWIFI_CIPHER_TYPE_UNKNOWN");
+        break;
+    }
+}
+
+static void wifi_setup()
+{
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+    assert(sta_netif);
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+static void wifi_scan(SerialPort& port) {
+
+    uint16_t number = DEFAULT_SCAN_LIST_SIZE;
+    wifi_ap_record_t ap_info[DEFAULT_SCAN_LIST_SIZE];
+    uint16_t ap_count = 0;
+    memset(ap_info, 0, sizeof(ap_info));
+
+    esp_wifi_scan_start(NULL, true);
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_info));
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_count));
+
+    for (int i = 0; (i < DEFAULT_SCAN_LIST_SIZE) && (i < ap_count); i++) {
+        char buf[80];
+        sprintf(buf, "%s\r\n", ap_info[i].ssid);
+        port.send(buf);
+        //ESP_LOGI(TAG, "RSSI \t\t%d", ap_info[i].rssi);
+        //print_auth_mode(ap_info[i].authmode);
+        //if (ap_info[i].authmode != WIFI_AUTH_WEP) {
+        //    print_cipher_type(ap_info[i].pairwise_cipher, ap_info[i].group_cipher);
+        //}
+        //ESP_LOGI(TAG, "Channel \t\t%d", ap_info[i].primary);
+    }
+}
+
 extern "C" {
+
   void app_main() {
+
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK( ret );
+
+    wifi_setup();
     run();
   }
+
 }
