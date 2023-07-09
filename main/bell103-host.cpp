@@ -6,6 +6,8 @@
 #include "freertos/task.h"
 #include <thread>
 
+#include "ShellProcessor.h"
+
 // In order on DEVKIT V1 board
 #define PIN_DATAOUT GPIO_NUM_13
 #define PIN_CLK GPIO_NUM_12
@@ -31,6 +33,11 @@ public:
   int rxEnergy();
   int txReady();
   int programReady();
+
+  /**
+   * Sends multiple characters of text using the UART
+   */
+  void send(const char* s);
 
 private:
 
@@ -176,6 +183,15 @@ int cmx865a::programReady() {
   return (a & 0b0010000000000000) != 0;
 }
 
+void cmx865a::send(const char* s) {
+  for (unsigned int i = 0; s[i] != 0; i++) {
+    // Wait util we can send
+    while (!txReady()) {
+    }
+    write8(0xe3, (uint8_t)s[i]);
+  }
+}
+
 /**
  * Enables modem (data) mode
  */
@@ -212,15 +228,6 @@ static void sendRingTone(cmx865a& modem) {
   modem.write16(0xe1, 0b0001000000001101);
 }
 
-static void sendText(cmx865a& modem,const char* s) {
-  for (unsigned int i = 0; s[i] != 0; i++) {
-    // Wait util we can send
-    while (!modem.txReady()) {
-    }
-    modem.write8(0xe3, (uint8_t)s[i]);
-  }
-}
-
 /**
  * Simulation of the Arduino delay(ms) function.  Just sleeps.
  */
@@ -234,7 +241,55 @@ static unsigned long millis() {
   return us_since_boot / 1000;
 }
 
-static void loop(cmx865a& modem);
+// ------ Integration for SerialProcessor -----------------------------------------
+
+class TestPort : public SerialPort {
+public:
+
+    TestPort(cmx865a* modem)
+    : _modem(modem) {        
+    }
+
+    void write(uint8_t c) {
+      // Wait util we can send
+      while (!_modem->txReady()) {
+      }
+      // Send
+      _modem->write8(0xe3, c);
+    }
+
+    uint8_t read() {
+      return 0;
+    }
+
+    bool isReadPending() {
+      return false;
+    }
+
+private:
+
+  cmx865a* _modem;
+};
+
+class TestEvent : public ShellProcessorEvent {
+public:
+
+    TestEvent(cmx865a* modem)
+    : _modem(modem) {        
+    }
+
+    void handleCommand(const uint8_t* cmd) {       
+      _modem->send("GOT COMMAND: [");
+      _modem->send((const char*)cmd);
+      _modem->send("]\n"); 
+    }
+
+private:
+
+  cmx865a* _modem;
+};
+
+static void loop(cmx865a& modem, ShellProcessor& shellProc);
 
 static void run() {
 
@@ -244,6 +299,11 @@ static void run() {
   gpio_set_direction(PIN_LED, GPIO_MODE_OUTPUT);
 
   cmx865a modem;
+
+  // Serial processor handles characters that come in on the model
+  TestPort port(&modem);
+  TestEvent event(&modem);
+  ShellProcessor shellProc(&port, &event);
 
   // General reset of the CMX865A
   modem.write0(0x01);
@@ -258,10 +318,10 @@ static void run() {
   // Per datasheet, start clock
   delay(20);
 
-  // Configure analog loopback, power on
   //write16(0xe0, 0x0900);
+  // Disable analog loopback, power on
   //                    5432109876543210
-  modem.write16(0xe0, 0b0000100100000000);
+  modem.write16(0xe0, 0b0000000100000000);
     
   // Program the tone pairs
   while (!modem.programReady()) { }
@@ -295,8 +355,6 @@ static void run() {
   while (!modem.programReady()) { }
   modem.write16(0xe8, 0x3981);
 
-  printf("Programmed\n");
-
   // Show good startup
   gpio_set_level(PIN_LED, 1);
   delay(250);
@@ -306,13 +364,13 @@ static void run() {
   delay(250);
   gpio_set_level(PIN_LED, 0);
 
-  loop(modem);
+  loop(modem, shellProc);
 }
 
 #define ON_HOOK 1
 #define OFF_HOOK 0
 
-static void loop(cmx865a& modem) {
+static void loop(cmx865a& modem, ShellProcessor& shellProc) {
 
   int lastHs = 1;
   long lastHsTransition = 0;
@@ -331,9 +389,10 @@ static void loop(cmx865a& modem) {
       if (modem.rxReady()) {
         uint8_t d = modem.read8(0xe5);
         //Serial.print((char)d);
+        shellProc.processInput(d);
         // Echo typed characters
-        while (!modem.txReady()) { }
-        modem.write8(0xe3, (uint8_t)d);
+        //while (!modem.txReady()) { }
+        //modem.write8(0xe3, (uint8_t)d);
       }
     
       /*
@@ -478,7 +537,7 @@ static void loop(cmx865a& modem) {
 
       // Send a message to the remote station
       delay(1000);
-      sendText(modem, "You are now connected.\r\nWelcome to the 1980's\r\n\r\n");
+      modem.send("You are now connected.\r\nWelcome to the 1980's\r\n\r\n");
     }
     else if (state == 11) {
       
