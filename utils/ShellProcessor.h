@@ -43,7 +43,7 @@ public:
             _clearLine();
         }
         // Look for end-of-line 
-        else if (c == 10) {
+        else if (c == 13) {
             // Optional echo 
             if (_echo) {
                 _port->write(10);

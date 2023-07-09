@@ -281,7 +281,7 @@ public:
     void handleCommand(const uint8_t* cmd) {       
       _modem->send("GOT COMMAND: [");
       _modem->send((const char*)cmd);
-      _modem->send("]\n"); 
+      _modem->send("]\r\n"); 
     }
 
 private:
