@@ -1,6 +1,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <thread>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <errno.h>
+#include <netdb.h>            // struct addrinfo
+#include <arpa/inet.h>
 
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
@@ -13,6 +18,7 @@
 #include "esp_wifi.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "esp_netif.h"
 
 #include "cmx865a.h"
 #include "ShellProcessor.h"
@@ -108,6 +114,8 @@ static unsigned long millis() {
   return us_since_boot / 1000;
 }
 
+static int telnet_setup();
+
 // ------ Integration for SerialProcessor -----------------------------------------
 
 class TestPort : public SerialPort {
@@ -141,23 +149,41 @@ private:
 class TestEvent : public ShellProcessorEvent {
 public:
 
-    TestEvent(cmx865a* modem)
-    : _modem(modem) {        
+    TestEvent(cmx865a* modem, int* telnetSocket)
+    : _modem(modem),
+      _telnetSocket(telnetSocket) {        
     }
 
     void handleCommand(const uint8_t* cmd) {       
+
       _modem->send("GOT COMMAND: [");
       _modem->send((const char*)cmd);
       _modem->send("]\r\n"); 
+
+      if (strcmp((const char*)cmd, "connect") == 0) {
+        // Open the telnet session 
+        *_telnetSocket = telnet_setup();
+        if (*_telnetSocket != 0) {
+          _modem->send("Telnet connected\r\n");
+        } else {
+          _modem->send("Telnet not connected\r\n");          
+        }
+      } else {
+        _modem->send("Unrecognized command\r\n");
+      }
     }
 
 private:
 
   cmx865a* _modem;
+  int* _telnetSocket;
 };
 
-static void loop(cmx865a& modem, ShellProcessor& shellProc, SerialPort& port);
 static void wifi_scan(SerialPort& port);
+
+#define ON_HOOK 1
+#define OFF_HOOK 0
+static const char *TAG = "wifi";
 
 static void run() {
 
@@ -166,11 +192,13 @@ static void run() {
   gpio_reset_pin(PIN_LED);
   gpio_set_direction(PIN_LED, GPIO_MODE_OUTPUT);
 
+  int telnetSocket = 0;
+
   cmx865a modem;
 
   // Serial processor handles characters that come in on the model
   TestPort port(&modem);
-  TestEvent event(&modem);
+  TestEvent event(&modem, &telnetSocket);
   ShellProcessor shellProc(&port, &event);
 
   // General reset of the CMX865A
@@ -232,14 +260,6 @@ static void run() {
   delay(250);
   gpio_set_level(PIN_LED, 0);
 
-  loop(modem, shellProc, port);
-}
-
-#define ON_HOOK 1
-#define OFF_HOOK 0
-
-static void loop(cmx865a& modem, ShellProcessor& shellProc, SerialPort& port) {
-
   int lastHs = 1;
   long lastHsTransition = 0;
   int hsState = ON_HOOK;
@@ -252,13 +272,53 @@ static void loop(cmx865a& modem, ShellProcessor& shellProc, SerialPort& port) {
   while (true) {
        
     if (state == 11) {
-      
+
       // Check for inbound on the modem
       if (modem.rxReady()) {
+
         uint8_t d = modem.read8(0xe5);
-        shellProc.processInput(d);
+
+        // If telnet isn't connected then pass input to the shell
+        if (telnetSocket == 0) {
+          shellProc.processInput(d);
+        } 
+        // Otherwise, pass input on the telnet session
+        else {
+          char buf[1];
+          buf[0] = d;
+          int written = send(telnetSocket, buf, 1, 0);
+          if (written < 0 && errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
+            modem.send("Send error\r\n");
+          }
+        }
       }
-    
+    }
+
+    // Check for inbound from telnet
+    if (telnetSocket != 0) {
+      // Non-blocking read
+      char rx_buffer[128];
+      int len = recv(telnetSocket, rx_buffer, sizeof(rx_buffer) - 1, 0);
+      // Error occurred during receiving
+      if (len < 0) {
+          if (errno == EINPROGRESS || errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Not an error
+          } else {
+            ESP_LOGE(TAG, "recv failed: errno %d", errno);
+          }
+      }
+      // Data received
+      else {
+          // Null-terminate whatever we received and treat like a string        
+          rx_buffer[len] = 0; 
+          modem.send(rx_buffer);
+          //ESP_LOGI(TAG, "Received %d bytes from %s:", len, host_ip);
+          //printf("%s", rx_buffer);
+      }
+
+    }
+
+    if (state == 11 || state == 12) {
       // Show RX energy indication on the LED
       if (modem.rxEnergy()) {
         gpio_set_level(PIN_LED, 1);
@@ -266,7 +326,7 @@ static void loop(cmx865a& modem, ShellProcessor& shellProc, SerialPort& port) {
         gpio_set_level(PIN_LED, 0);
       }
     }
-    
+
     // Look for a hookswitch transition  
     const int hs = gpio_get_level(PIN_HOOKSWITCH);
     if (hs != lastHs) {
@@ -393,9 +453,17 @@ static void loop(cmx865a& modem, ShellProcessor& shellProc, SerialPort& port) {
       delay(1000);
       modem.send("You are now connected.\r\nWelcome to the 1980's\r\n\r\n");
       // Show the WIFI networks
-      port.send("WIFI networks:\r\n");
-      wifi_scan(port);
-      port.send("\r\n");
+      //port.send("WIFI networks:\r\n");
+      //wifi_scan(port);
+      //port.send("\r\n");
+
+      // Establish telnet session
+      int telnetSocket = telnet_setup();
+      if (telnetSocket != 0) {
+        port.send("telnet connected\r\n");
+      } else {
+        port.send("telnet not connected\r\n");
+      }
     }
     else if (state == 11) {
       
@@ -407,6 +475,12 @@ static void loop(cmx865a& modem, ShellProcessor& shellProc, SerialPort& port) {
         //Serial.print("AT+DISC");
         //Serial.write(10);
         
+        // Disconnect telnet if necessary
+        if (telnetSocket != 0) {
+          close(telnetSocket);
+          telnetSocket = 0;
+        }
+
         sendSilence(modem);
         
         state = 0;
@@ -426,8 +500,7 @@ static void loop(cmx865a& modem, ShellProcessor& shellProc, SerialPort& port) {
 
 #define DEFAULT_SCAN_LIST_SIZE 20
 
-static const char *TAG = "wifi";
-
+/*
 static void print_auth_mode(int authmode)
 {
     switch (authmode) {
@@ -535,7 +608,7 @@ static void print_cipher_type(int pairwise_cipher, int group_cipher)
         break;
     }
 }
-
+*/
 // FreeRTOS event group to signal when we are connected
 static EventGroupHandle_t s_wifi_event_group;
 
@@ -548,7 +621,7 @@ static EventGroupHandle_t s_wifi_event_group;
 
 static int s_retry_num = 0;
 
-static void event_handler(void* arg, esp_event_base_t event_base,
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
   int32_t event_id, void* event_data) {
 
   if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -563,7 +636,12 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
     }
     ESP_LOGI(TAG,"connect to the AP fail");
-  } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+  }
+}
+
+static void ip_event_handler(void* arg, esp_event_base_t event_base,
+  int32_t event_id, void* event_data) {
+  if (event_id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
     ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
     s_retry_num = 0;
@@ -589,31 +667,22 @@ static void wifi_setup() {
 
   ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
                                                       ESP_EVENT_ANY_ID,
-                                                      &event_handler,
+                                                      &wifi_event_handler,
                                                       NULL,
                                                       &instance_any_id));
   ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
                                                       IP_EVENT_STA_GOT_IP,
-                                                      &event_handler,
+                                                      &ip_event_handler,
                                                       NULL,
                                                       &instance_got_ip));
 
+  // Clear configuration structure before using
   wifi_config_t wifi_config;
-  // Clear
   memset((void*)&wifi_config, 0, sizeof(wifi_config));
   // Setup SSID and password
   strcpy((char*)wifi_config.sta.ssid, EXAMPLE_ESP_WIFI_SSID);
   strcpy((char*)wifi_config.sta.password, EXAMPLE_ESP_WIFI_PASS);
   wifi_config.sta.scan_method = WIFI_FAST_SCAN;
-  /* Authmode threshold resets to WPA2 as default if password matches WPA2 standards (pasword len => 8).
-    * If you want to connect the device to deprecated WEP/WPA networks, Please set the threshold value
-    * to WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK and set the password with length and format matching to
-    * WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK standards.
-    */
-  //wifi_config.sta.threshold.authmode = ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD;
-  //wifi_config.sta.sae_pwe_h2e = ESP_WIFI_SAE_MODE;
-  //wifi_config.sta.sae_h2e_identifier = EXAMPLE_H2E_IDENTIFIER;
-
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
   ESP_ERROR_CHECK(esp_wifi_start());
@@ -640,6 +709,75 @@ static void wifi_setup() {
       ESP_LOGE(TAG, "UNEXPECTED EVENT");
   }
 }
+
+/**
+ * Opens a telnet session and returns the socket file descriptor if successful.
+ * Otherwise, returns 0.
+ */
+static int telnet_setup() {
+
+  // Try to connect to something  
+  //char rx_buffer[128];
+  char host_ip[] = "64.13.139.230";
+  int host_port = 23;
+  int addr_family = 0;
+  int ip_protocol = 0;
+
+  struct sockaddr_in dest_addr;
+  inet_pton(AF_INET, host_ip, &dest_addr.sin_addr);
+  dest_addr.sin_family = AF_INET;
+  dest_addr.sin_port = htons(host_port);
+  addr_family = AF_INET;
+  ip_protocol = IPPROTO_IP;
+
+  int sock =  socket(addr_family, SOCK_STREAM, ip_protocol);
+  if (sock < 0) {
+      ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+      return 0;
+  }
+  ESP_LOGI(TAG, "Socket created, connecting to %s:%d", host_ip, host_port);
+
+  int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+  if (err != 0) {
+      ESP_LOGE(TAG, "Socket unable to connect: errno %d", errno);
+      close(sock);
+      return 0;
+  }
+
+  // Marking the socket as non-blocking
+  int flags = fcntl(sock, F_GETFL);
+  if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+      ESP_LOGE(TAG, "Unable to set socket non blocking");
+      close(sock);
+      return 0;
+  }
+
+  return sock;
+}
+
+/*
+  while (1) {
+    // Normally a blocking call    
+    int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+    // Error occurred during receiving
+    if (len < 0) {
+        if (errno == EINPROGRESS || errno == EAGAIN || errno == EWOULDBLOCK) {
+          // Not an error
+        } else {
+          ESP_LOGE(TAG, "recv failed: errno %d", errno);
+          break;
+        }
+    }
+    // Data received
+    else {
+        // Null-terminate whatever we received and treat like a string        
+        rx_buffer[len] = 0; 
+        //ESP_LOGI(TAG, "Received %d bytes from %s:", len, host_ip);
+        printf("%s", rx_buffer);
+    }
+  }
+}
+*/
 
 static void wifi_scan(SerialPort& port) {
 
@@ -678,7 +816,9 @@ extern "C" {
     ESP_ERROR_CHECK( ret );
 
     wifi_setup();
+
+    ESP_LOGI(TAG, "Entering main loop");
+   
     run();
   }
-
 }
