@@ -1,6 +1,7 @@
 #ifndef _ShellProcessor_h
 #define _ShellProcessor_h
 
+#include <stdio.h>
 #include "SerialPort.h"
 
 /**
@@ -29,11 +30,11 @@ public:
     }
 
     void processInput(uint8_t c) {        
-        // Look for backspace
-        if (c == 8) {
+        // Look for DEL
+        if (c == 127) {
             if (_bufLen > 0) {
                 // Clear the character from the screen
-                _port->write(8);
+                _port->write(127);
                 _bufLen--;
                 _buf[_bufLen] = 0;
             }

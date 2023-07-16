@@ -20,6 +20,10 @@
 #include "nvs_flash.h"
 #include "esp_netif.h"
 
+#include "lwip/inet.h"
+#include "lwip/ip4_addr.h"
+#include "lwip/dns.h"
+
 #include "cmx865a.h"
 #include "ShellProcessor.h"
 #include "CircularByteBuffer.h"
@@ -65,6 +69,13 @@
 #elif CONFIG_ESP_WIFI_AUTH_WAPI_PSK
 #define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WAPI_PSK
 #endif
+
+static void wifi_scan(SerialPort& port);
+
+#define ON_HOOK 1
+#define OFF_HOOK 0
+static const char *TAG = "wifi";
+static ip_addr_t ipAddr;
 
 /**
  * Enables modem (data) mode
@@ -115,7 +126,7 @@ static unsigned long millis() {
   return us_since_boot / 1000;
 }
 
-static int telnet_setup();
+static int telnet_setup(const char* addr);
 
 // ------ Integration for SerialProcessor -----------------------------------------
 
@@ -147,44 +158,56 @@ private:
   cmx865a* _modem;
 };
 
-class TestEvent : public ShellProcessorEvent {
+class EventHandler : public ShellProcessorEvent {
 public:
 
-    TestEvent(cmx865a* modem, int* telnetSocket)
+    EventHandler(SerialPort* modem, int* telnetSocket)
     : _modem(modem),
       _telnetSocket(telnetSocket) {        
     }
 
     void handleCommand(const uint8_t* cmd) {       
 
+      /*
       _modem->send("GOT COMMAND: [");
       _modem->send((const char*)cmd);
       _modem->send("]\r\n"); 
+      */
 
-      if (strcmp((const char*)cmd, "connect") == 0) {
+      if (strncmp((const char*)cmd, "connect ", 8) == 0) {
+
+        // Resolve the DNS
+        char addr[32];
+        strcpy(addr, (const char*)cmd + 8);
+
+        _modem->send("Connecting to ");
+        _modem->send(addr);
+        _modem->send("\r\n");
+
         // Open the telnet session 
-        *_telnetSocket = telnet_setup();
+        *_telnetSocket = telnet_setup(addr);
         if (*_telnetSocket != 0) {
           _modem->send("Telnet connected\r\n");
         } else {
           _modem->send("Telnet not connected\r\n");          
         }
-      } else {
-        _modem->send("Unrecognized command\r\n");
+      } 
+      else if (strcmp((const char*)cmd, "scan") == 0) {
+        _modem->send("Scanning for WIFI stations\r\n");
+        wifi_scan(*_modem);
+      } 
+      else {
+        _modem->send("Unrecognized command: [");
+        _modem->send((const char*)cmd);
+        _modem->send("\r\n");
       }
     }
 
 private:
 
-  cmx865a* _modem;
+  SerialPort* _modem;
   int* _telnetSocket;
 };
-
-static void wifi_scan(SerialPort& port);
-
-#define ON_HOOK 1
-#define OFF_HOOK 0
-static const char *TAG = "wifi";
 
 // Buffer for inbound from telnet
 static char recBufArea[4096];
@@ -202,7 +225,7 @@ static void run() {
 
   // Serial processor handles characters that come in on the model
   TestPort port(&modem);
-  TestEvent event(&modem, &telnetSocket);
+  EventHandler event(&port, &telnetSocket);
   ShellProcessor shellProc(&port, &event);
 
   // NOTE: This wraps a static buffer!
@@ -468,11 +491,8 @@ static void run() {
       // Send a message to the remote station
       delay(1000);
       modem.send("You are now connected.\r\nWelcome to the 1980's\r\n\r\n");
-      // Show the WIFI networks
-      //port.send("WIFI networks:\r\n");
-      //wifi_scan(port);
-      //port.send("\r\n");
 
+      /*
       // Establish telnet session
       telnetSocket = telnet_setup();
       if (telnetSocket != 0) {
@@ -480,6 +500,7 @@ static void run() {
       } else {
         modem.send("telnet not connected\r\n");
       }
+      */
     }
     else if (state == 11) {
       
@@ -728,11 +749,9 @@ static void wifi_setup() {
  * Opens a telnet session and returns the socket file descriptor if successful.
  * Otherwise, returns 0.
  */
-static int telnet_setup() {
+static int telnet_setup(const char* host_ip) {
 
   // Try to connect to something  
-  //char rx_buffer[128];
-  char host_ip[] = "64.13.139.230";
   int host_port = 23;
   int addr_family = 0;
   int ip_protocol = 0;
@@ -768,30 +787,6 @@ static int telnet_setup() {
 
   return sock;
 }
-
-/*
-  while (1) {
-    // Normally a blocking call    
-    int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
-    // Error occurred during receiving
-    if (len < 0) {
-        if (errno == EINPROGRESS || errno == EAGAIN || errno == EWOULDBLOCK) {
-          // Not an error
-        } else {
-          ESP_LOGE(TAG, "recv failed: errno %d", errno);
-          break;
-        }
-    }
-    // Data received
-    else {
-        // Null-terminate whatever we received and treat like a string        
-        rx_buffer[len] = 0; 
-        //ESP_LOGI(TAG, "Received %d bytes from %s:", len, host_ip);
-        printf("%s", rx_buffer);
-    }
-  }
-}
-*/
 
 static void wifi_scan(SerialPort& port) {
 
