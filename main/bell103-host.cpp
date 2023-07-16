@@ -20,10 +20,6 @@
 #include "nvs_flash.h"
 #include "esp_netif.h"
 
-#include "lwip/inet.h"
-#include "lwip/ip4_addr.h"
-#include "lwip/dns.h"
-
 #include "cmx865a.h"
 #include "ShellProcessor.h"
 #include "CircularByteBuffer.h"
@@ -168,12 +164,6 @@ public:
 
     void handleCommand(const uint8_t* cmd) {       
 
-      /*
-      _modem->send("GOT COMMAND: [");
-      _modem->send((const char*)cmd);
-      _modem->send("]\r\n"); 
-      */
-
       if (strncmp((const char*)cmd, "connect ", 8) == 0) {
 
         // Resolve the DNS
@@ -197,7 +187,7 @@ public:
         wifi_scan(*_modem);
       } 
       else {
-        _modem->send("Unrecognized command: [");
+        _modem->send("Unrecognized command: ");
         _modem->send((const char*)cmd);
         _modem->send("\r\n");
       }
@@ -491,26 +481,11 @@ static void run() {
       // Send a message to the remote station
       delay(1000);
       modem.send("You are now connected.\r\nWelcome to the 1980's\r\n\r\n");
-
-      /*
-      // Establish telnet session
-      telnetSocket = telnet_setup();
-      if (telnetSocket != 0) {
-        modem.send("telnet connected\r\n");
-      } else {
-        modem.send("telnet not connected\r\n");
-      }
-      */
     }
     else if (state == 11) {
       
       // Wait for hangup
       if (hsState == ON_HOOK) {
-
-        //Serial.write(26);
-        //Serial.write(26);
-        //Serial.print("AT+DISC");
-        //Serial.write(10);
         
         // Disconnect telnet if necessary
         if (telnetSocket != 0) {
@@ -528,6 +503,12 @@ static void run() {
       if (hsState == ON_HOOK) {
         state = 0;
         stateChangeStamp = millis();
+      }
+
+      // Disconnect telnet if necessary
+      if (telnetSocket != 0) {
+        close(telnetSocket);
+        telnetSocket = 0;
       }
     }
   }
@@ -749,7 +730,13 @@ static void wifi_setup() {
  * Opens a telnet session and returns the socket file descriptor if successful.
  * Otherwise, returns 0.
  */
-static int telnet_setup(const char* host_ip) {
+static int telnet_setup(const char* host) {
+
+  // Do a DNS resolve
+  struct hostent* he = gethostbyname(host);
+  if (he == 0) {
+    return 0;
+  }
 
   // Try to connect to something  
   int host_port = 23;
@@ -757,7 +744,7 @@ static int telnet_setup(const char* host_ip) {
   int ip_protocol = 0;
 
   struct sockaddr_in dest_addr;
-  inet_pton(AF_INET, host_ip, &dest_addr.sin_addr);
+  inet_pton(AF_INET, inet_ntoa(*(struct in_addr*)he->h_addr), &dest_addr.sin_addr);
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons(host_port);
   addr_family = AF_INET;
@@ -768,7 +755,6 @@ static int telnet_setup(const char* host_ip) {
       ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
       return 0;
   }
-  ESP_LOGI(TAG, "Socket created, connecting to %s:%d", host_ip, host_port);
 
   int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
   if (err != 0) {
