@@ -458,11 +458,11 @@ static void run() {
       //port.send("\r\n");
 
       // Establish telnet session
-      int telnetSocket = telnet_setup();
+      telnetSocket = telnet_setup();
       if (telnetSocket != 0) {
-        port.send("telnet connected\r\n");
+        modem.send("telnet connected\r\n");
       } else {
-        port.send("telnet not connected\r\n");
+        modem.send("telnet not connected\r\n");
       }
     }
     else if (state == 11) {
