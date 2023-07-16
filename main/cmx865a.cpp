@@ -140,11 +140,13 @@ int cmx865a::programReady() {
   return (a & 0b0010000000000000) != 0;
 }
 
-void cmx865a::send(const char* s) {
-  for (unsigned int i = 0; s[i] != 0; i++) {
+void cmx865a::sendByte(uint8_t b) {
     // Wait util we can send
-    while (!txReady()) {
-    }
-    write8(0xe3, (uint8_t)s[i]);
-  }
+    while (!txReady()) { }
+    write8(0xe3, b);
+}
+
+void cmx865a::send(const char* s) {
+  for (unsigned int i = 0; s[i] != 0; i++) 
+    sendByte(s[i]);
 }

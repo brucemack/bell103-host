@@ -22,6 +22,7 @@
 
 #include "cmx865a.h"
 #include "ShellProcessor.h"
+#include "CircularByteBuffer.h"
 
 #define MAXIMUM_AP 20
 
@@ -185,6 +186,9 @@ static void wifi_scan(SerialPort& port);
 #define OFF_HOOK 0
 static const char *TAG = "wifi";
 
+// Buffer for inbound from telnet
+static char recBufArea[4096];
+
 static void run() {
 
   gpio_reset_pin(PIN_HOOKSWITCH);
@@ -200,6 +204,9 @@ static void run() {
   TestPort port(&modem);
   TestEvent event(&modem, &telnetSocket);
   ShellProcessor shellProc(&port, &event);
+
+  // NOTE: This wraps a static buffer!
+  CircularByteBuffer recBuf((uint8_t*)recBufArea, sizeof(recBufArea));
 
   // General reset of the CMX865A
   modem.write0(0x01);
@@ -270,13 +277,15 @@ static void run() {
   int dialDigits[10];
 
   while (true) {
+
+    std::this_thread::yield();
        
     if (state == 11) {
 
       // Check for inbound on the modem
       if (modem.rxReady()) {
 
-        uint8_t d = modem.read8(0xe5);
+        const uint8_t d = modem.read8(0xe5);
 
         // If telnet isn't connected then pass input to the shell
         if (telnetSocket == 0) {
@@ -284,9 +293,7 @@ static void run() {
         } 
         // Otherwise, pass input on the telnet session
         else {
-          char buf[1];
-          buf[0] = d;
-          int written = send(telnetSocket, buf, 1, 0);
+          int written = send(telnetSocket, (const void*) &d, 1, 0);
           if (written < 0 && errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
             modem.send("Send error\r\n");
           }
@@ -294,11 +301,12 @@ static void run() {
       }
     }
 
-    // Check for inbound from telnet
+    // Check for inbound from telnet, assuming we can hold the data
     if (telnetSocket != 0) {
-      // Non-blocking read
-      char rx_buffer[128];
-      int len = recv(telnetSocket, rx_buffer, sizeof(rx_buffer) - 1, 0);
+      
+      // Do a non-blocking read and pull as much off the socket as possible
+      uint8_t rxBuffer[64];
+      int len = recv(telnetSocket, (void*)rxBuffer, sizeof(rxBuffer), 0);
       // Error occurred during receiving
       if (len < 0) {
           if (errno == EINPROGRESS || errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -309,14 +317,22 @@ static void run() {
       }
       // Data received
       else {
-          // Null-terminate whatever we received and treat like a string        
-          rx_buffer[len] = 0; 
-          modem.send(rx_buffer);
-          //ESP_LOGI(TAG, "Received %d bytes from %s:", len, host_ip);
-          //printf("%s", rx_buffer);
+        for (unsigned int i = 0; i < len; i++) {
+          // Overflow is ignored
+          if (recBuf.canWrite())
+            recBuf.write(rxBuffer[i]);
+          else {
+            ESP_LOGE(TAG, "Receive overflow");
+            break;
+          }
+        }
       }
-
     }
+
+    // Forward any received data to the modem
+    if (telnetSocket != 0 && recBuf.canRead())
+      modem.sendByte(recBuf.read());
+
 
     if (state == 11 || state == 12) {
       // Show RX energy indication on the LED
@@ -493,8 +509,6 @@ static void run() {
         stateChangeStamp = millis();
       }
     }
-
-    std::this_thread::yield();
   }
 }
 

@@ -25,6 +25,11 @@ public:
   int programReady();
 
   /**
+   * Waits until txRead and then sends a byte on the UART
+   */
+  void sendByte(uint8_t b);
+
+  /**
    * Sends multiple characters of text using the UART
    */
   void send(const char* s);
