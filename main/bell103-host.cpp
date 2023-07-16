@@ -479,8 +479,17 @@ static void run() {
       //Serial.write(10);   
 
       // Send a message to the remote station
-      delay(1000);
+      delay(2000);
       modem.send("You are now connected.\r\nWelcome to the 1980's\r\n\r\n");
+
+      // Clear some junk from the line
+      delay(10);
+      for (unsigned int i = 0; i < 10; i++) {
+        if (modem.rxReady()) {
+          modem.read8(0xe5);
+        }
+      }
+
     }
     else if (state == 11) {
       
